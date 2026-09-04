@@ -81,13 +81,13 @@ def sequential_update(initial_prior, readings, p_y1_given_h1, p_y1_given_h0):
     pattern from the Dirichlet code, and the same pattern the Kalman
     filter uses every timestep -- worth noticing the recurrence.
     """
-    posteriors = np.zeros([np.size(readings)])
-    posteriors[0] = initial_prior
-    for idx in range(1, np.size(readings)):
-        posteriors[idx] = bayes_posterior(posteriors[idx-1], p_y1_given_h1, p_y1_given_h0, 1)
-        
+    posteriors = np.zeros(len(readings))
+    prior = initial_prior
+    for idx, reading in enumerate(readings):
+        posterior = bayes_posterior(prior, p_y1_given_h1, p_y1_given_h0, reading)
+        posteriors[idx] = posterior
+        prior = posterior
     return posteriors
-    raise NotImplementedError
 
 
 def simulate_sensor_passes(true_fire_state, n_passes, p_y1_given_h1, p_y1_given_h0):
@@ -116,6 +116,8 @@ if __name__ == "__main__":
     plt.axhline(0.95, color='red', linestyle='--', label='95% confidence')
     plt.xlabel("sensor pass #"); plt.ylabel("p(fire | readings so far)")
     plt.legend(); plt.title("Belief about wildfire presence, updated pass by pass")
+    plt.savefig("wildfire_belief.png", dpi=150)
     plt.show()
+    
 
     print("Fill in bayes_posterior and sequential_update, then uncomment the block above.")
