@@ -1,0 +1,328 @@
+"""
+SECTION 2.6 -- Univariate Gaussian: cdf, pdf, moments, regression
+
+THE INVESTIGATION: one weather station's temperature-anomaly readings.
+Two questions about this SAME kind of data:
+
+  (A) Statistically: characterize ONE station's readings as a Gaussian --
+      what's its mean, spread, and a 95%-confidence range for tomorrow's
+      reading? -> gaussian_pdf/cdf/quantile/mle/central_interval.
+
+  (B) Predictively: does a station's ELEVATION change how much we should
+      trust its reading? High-elevation stations are sparser and noisier
+      -- does the model need input-DEPENDENT uncertainty (heteroscedastic,
+      2.6.3), or is a single fixed uncertainty (homoscedastic) enough?
+      -> softplus -> forward_gaussian_regression -> gaussian_nll_regression
+      -> gradients -> train, fit BOTH regimes with one function (homo-
+      scedastic = heteroscedastic with the variance-weight frozen at 0).
+
+Order (each step needs the ones before it):
+  1. gaussian_pdf, gaussian_cdf     -- standalone, generalize 2.2's empirical cdf to an analytic one
+  2. quantile_gaussian               -- needs gaussian_cdf (bisection search on it, same idea as 2.2's inverse-cdf lookup)
+  3. gaussian_mle                    -- standalone, generalizes 2.4's theta_hat=y.mean() to mu,sigma2
+  4. central_interval                -- needs quantile_gaussian
+  5. softplus                        -- standalone, keeps predicted variance positive
+  6. forward_gaussian_regression     -- needs softplus
+  7. gaussian_nll_regression         -- needs forward_gaussian_regression's output
+  8. gradients_gaussian_regression   -- needs forward_gaussian_regression's output. Derive on paper first.
+  9. train_gaussian_regression       -- solves (B), needs #6-#8
+"""
+
+import numpy as np
+from math import erf
+import matplotlib.pyplot as plt
+
+rng = np.random.default_rng(17)
+
+
+def generate_station_readings(true_mu=15.0, true_sigma=2.0, n=200):
+    """
+    Why: one station's raw data for investigation (A).
+    In: true_mu (float, deg C), true_sigma (float), n (int).
+    Out: (n,) array of synthetic temperature-anomaly readings.
+    """
+    return rng.normal(true_mu, true_sigma, n)
+
+
+def generate_elevation_temperature(n=300):
+    """
+    Why: dataset for investigation (B) -- noise genuinely grows with
+    elevation (sparser/harsher high-altitude sensors), so a heteroscedastic
+    model should out-perform a homoscedastic one on this data.
+    In: n (int). Out: elevation (n,) in [0,3000]m, temperature (n,) in deg C.
+    """
+    elevation = rng.uniform(0, 3000, n)
+    true_mu = 25.0 - 0.006 * elevation
+    true_sigma = 0.5 + 0.003 * elevation
+    temperature = rng.normal(true_mu, true_sigma)
+    return elevation, temperature
+
+
+# ---------------------------------------------------------------------------
+# (A) Statistical question: characterize ONE station's Gaussian
+# ---------------------------------------------------------------------------
+
+def gaussian_pdf(y, mu, sigma2):
+    """
+    Why: the density this whole section is about -- needed to visualize
+    the fitted distribution and as the basis for gaussian_nll_regression later.
+    In: y (float or ndarray), mu (float), sigma2 (float, variance not std).
+    Out: same shape as y, the density N(y|mu,sigma2).
+    Formula: (1/sqrt(2*pi*sigma2)) * exp(-(y-mu)**2 / (2*sigma2)).
+    Checkpoint: gaussian_pdf(0, 0, 0.1) == 3.99 (this exact value is quoted
+    in the book text -- a density CAN exceed 1, that's not a bug).
+    """
+    return (1 / np.sqrt(2 * np.pi * sigma2)) * np.exp(-((y - mu) ** 2) / (2 * sigma2))
+
+
+def gaussian_cdf(y, mu, sigma2):
+    """
+    Why: needed by quantile_gaussian next, and to answer "P(reading <= y)".
+    In: y (float), mu (float), sigma2 (float, variance).
+    Out: float in [0,1].
+    Formula: Phi(y;mu,sigma2) = 0.5*(1+erf(z/sqrt(2))), z=(y-mu)/sqrt(sigma2).
+    Use math.erf -- reimplementing erf's integral numerically is a
+    stability trap, not a learning objective here (same spirit as math.comb).
+    Checkpoint: gaussian_cdf(0, 0, 1) == 0.5. gaussian_cdf(1.96, 0, 1) ~= 0.975.
+    """
+    c = (y - mu) / (np.sqrt(2 * sigma2))
+    return 0.5 * (1 + erf(c))
+
+    raise NotImplementedError
+
+
+def quantile_gaussian(q, mu, sigma2):
+    """
+    Why: inverse of gaussian_cdf -- needed by central_interval next. No
+    closed form for erf's inverse without a special-function library, so
+    find it the same way you found quantiles from an empirical cdf in
+    2.2 -- there you used searchsorted on a table; here, search by
+    bisection on your own gaussian_cdf instead (no table exists, but
+    gaussian_cdf is monotonic, so bisection works the same way).
+    In: q (float in (0,1)), mu (float), sigma2 (float).
+    Out: float, the value y such that gaussian_cdf(y,mu,sigma2) ~= q.
+    Checkpoint: quantile_gaussian(0.975, 0, 1) ~= 1.96.
+    """
+
+    low, high = mu - 10 * np.sqrt(sigma2), mu + 10 * np.sqrt(sigma2)
+    for _ in range(100):  # limit iterations to avoid infinite loop
+        mid = (low + high) / 2
+        if gaussian_cdf(mid, mu, sigma2) < q:
+            low = mid
+        else:
+            high = mid
+        if high - low <= 1e-3:
+            break
+    return (low + high) / 2
+
+    raise NotImplementedError
+
+
+
+
+
+
+
+
+def gaussian_mle(data):
+    """
+    Why: fits THIS station's actual mu, sigma2 from its readings --
+    generalizes 2.4's theta_hat=y.mean() (Bernoulli MLE) to the Gaussian case.
+    In: data (N,) array of readings.
+    Out: (mu_hat, sigma2_hat), both floats. sigma2_hat uses the MLE (divide
+    by N, not N-1 -- that correction is a different estimator, not needed here).
+    Formula: mu_hat = mean(data); sigma2_hat = mean((data-mu_hat)**2).
+    Checkpoint: on generate_station_readings(15.0, 2.0, n=5000), mu_hat
+    should land close to 15.0, sigma2_hat close to 4.0.
+    """
+
+    return np.mean(data), np.mean((data - np.mean(data)) ** 2)
+
+    raise NotImplementedError
+
+
+def central_interval(mu, sigma2, conf=0.95):
+    """
+    Why: answers "what range should tomorrow's reading fall in, 95% of the
+    time?" -- direct use of quantile_gaussian, and reproduces the book's
+    own (mu-1.96*sigma, mu+1.96*sigma) result as a special case.
+    In: mu (float), sigma2 (float), conf (float in (0,1), e.g. 0.95).
+    Out: (low, high) tuple, floats.
+    Formula: alpha = 1-conf; (quantile_gaussian(alpha/2,...), quantile_gaussian(1-alpha/2,...)).
+    Checkpoint: central_interval(0, 1, 0.95) ~= (-1.96, 1.96).
+    """
+
+    alpha = 1 - conf
+    low = quantile_gaussian(alpha / 2, mu, sigma2)
+    high = quantile_gaussian(1 - alpha / 2, mu, sigma2)
+    return low, high
+
+
+# ---------------------------------------------------------------------------
+# (B) Predictive question: does elevation change how much to trust a reading?
+# ---------------------------------------------------------------------------
+
+def softplus(a):
+    """
+    Why: keeps a predicted variance positive -- a raw linear score can be
+    negative, but sigma^2 can't. Needed by forward_gaussian_regression next.
+    In: a (float or ndarray). Out: same shape, values > 0.
+    Formula: softplus(a) = log(1 + e**a).
+    Checkpoint: softplus(0) ~= 0.693 (log(2)). Large positive a -> softplus(a)~=a.
+    Large negative a -> softplus(a)~=0.
+    """
+    return np.log(1 + np.exp(a))
+
+
+def forward_gaussian_regression(x, w_mu, b_mu, w_sigma, b_sigma):
+    """
+    Why: the model itself -- predicts BOTH a mean and a (positive) std per
+    input x. Setting w_sigma=0 permanently (never updated in training)
+    makes this reduce exactly to homoscedastic regression -- same
+    function, one fewer degree of freedom.
+    In: x (N,), w_mu (float), b_mu (float), w_sigma (float), b_sigma (float).
+    Out: (mu_pred (N,), sigma_pred (N,)) -- sigma_pred is std, not variance.
+    Formula: mu_pred = w_mu*x+b_mu; sigma_pred = softplus(w_sigma*x+b_sigma).
+    Checkpoint: w_mu=w_sigma=0, b_mu=15, b_sigma=0 -> mu_pred all 15,
+    sigma_pred all ~0.693 (constant regardless of x -- homoscedastic case).
+    """
+
+    mu_pred = w_mu * x + b_mu
+    sigma_pred = softplus(w_sigma * x + b_sigma)
+    return mu_pred, sigma_pred
+
+    raise NotImplementedError
+
+
+def gaussian_nll_regression(y_true, mu_pred, sigma_pred):
+    """
+    Why: one scalar saying how wrong the CURRENT (mu,sigma) predictions
+    are, across all N points -- generalizes 2.4's Bernoulli nll_loss to a
+    continuous Gaussian output. Needed before improving the weights
+    (next: gradients_gaussian_regression).
+    In: y_true (N,) actual readings, mu_pred (N,), sigma_pred (N,) (std, not variance).
+    Out: scalar.
+    Formula: mean( 0.5*log(2*pi*sigma_pred**2) + (y_true-mu_pred)**2/(2*sigma_pred**2) )
+    -- this is -log(gaussian_pdf(y_true, mu_pred, sigma_pred**2)), averaged.
+    Checkpoint: for a point where y_true==mu_pred exactly, that point's
+    term reduces to just 0.5*log(2*pi*sigma_pred**2) -- verify by hand on one point.
+    """
+
+    return np.mean(0.5 * np.log(2 * np.pi * sigma_pred ** 2) + ((y_true - mu_pred) ** 2) / (2 * sigma_pred ** 2))
+    raise NotImplementedError
+
+
+def gradients_gaussian_regression(x, y_true, mu_pred, sigma_pred):
+    """
+    Why: tells you which direction to move w_mu,b_mu,w_sigma,b_sigma to
+    reduce gaussian_nll_regression -- needed by the training loop, next.
+    In: x (N,), y_true (N,), mu_pred (N,), sigma_pred (N,).
+    Out: (grad_w_mu, grad_b_mu, grad_w_sigma, grad_b_sigma), all floats.
+    Derive on paper: take d(nll)/d(mu_pred) and d(nll)/d(sigma_pred) first,
+    then chain-rule each through mu_pred=w_mu*x+b_mu and
+    sigma_pred=softplus(w_sigma*x+b_sigma) (recall softplus'(a) = sigmoid(a),
+    a fact worth confirming for yourself the same way you confirmed
+    sigmoid's clean derivative in 2.4).
+    """
+
+    sigmoid_a = 1 - np.exp(-sigma_pred)
+
+    grad_mu = (mu_pred - y_true) / (sigma_pred ** 2)
+    grad_sigma = (( (1 / sigma_pred) - ((y_true - mu_pred) ** 2) / (sigma_pred ** 3) )  * sigmoid_a)   # softplus derivative
+
+    grad_w_mu = np.mean(grad_mu * x)
+    grad_b_mu = np.mean(grad_mu)
+
+    grad_w_sigma = np.mean(grad_sigma * x)
+    grad_b_sigma = np.mean(grad_sigma)
+
+    return grad_w_mu, grad_b_mu, grad_w_sigma, grad_b_sigma
+
+    raise NotImplementedError
+
+
+def train_gaussian_regression(x, y, lr=1e-2, n_steps=2000, heteroscedastic=True):
+    """
+    Why: fits the model -- runs forward_gaussian_regression/
+    gaussian_nll_regression/gradients_gaussian_regression together,
+    repeatedly. heteroscedastic=False reproduces the OTHER regime from
+    the SAME function, by never letting w_sigma move away from 0.
+    In: x (N,), y (N,), lr (float), n_steps (int), heteroscedastic (bool).
+    Out: (w_mu, b_mu, w_sigma, b_sigma), all floats.
+    Loop n_steps times: forward -> loss (print every 200) -> gradients ->
+    update all four params by -=lr*grad, EXCEPT if heteroscedastic=False,
+    skip updating w_sigma (leave it at its initial 0 the whole time).
+    Checkpoint: printed loss decreases monotonically for both regimes.
+    """
+    x_scaled = (x - np.mean(x)) / np.std(x)  # Standardize x for better training stability
+    w_mu, b_mu, w_sigma, b_sigma = 0.0, 0.0, 0.0, 0.0
+
+    for step in range(n_steps):
+        mu_pred, sigma_pred = forward_gaussian_regression(x_scaled, w_mu, b_mu, w_sigma, b_sigma)
+        loss = gaussian_nll_regression(y, mu_pred, sigma_pred)
+        grad_w_mu, grad_b_mu, grad_w_sigma, grad_b_sigma = gradients_gaussian_regression(x_scaled, y, mu_pred, sigma_pred)
+
+        w_mu -= lr * grad_w_mu
+        b_mu -= lr * grad_b_mu
+        if heteroscedastic:
+            w_sigma -= lr * grad_w_sigma
+            b_sigma -= lr * grad_b_sigma
+
+        if step % 200 == 0:
+            print(f"Step {step}, loss: {loss:.4f}")
+
+
+    w_mu_raw = w_mu / np.std(x)  # Adjust w_mu back to original scale
+    b_mu_raw = b_mu - (w_mu * np.mean(x) / np.std(x))  # Adjust b_mu back to original scale
+
+    w_sigma_raw = w_sigma / np.std(x)  # Adjust w_sigma back to original scale
+    b_sigma_raw = b_sigma - (w_sigma * np.mean(x) / np.std(x))  # Adjust b_sigma back to original scale
+
+    return w_mu_raw, b_mu_raw, w_sigma_raw, b_sigma_raw
+
+
+if __name__ == "__main__":
+    # (A) Statistical
+    readings = generate_station_readings()
+    mu_hat, sigma2_hat = gaussian_mle(readings)
+    print(f"station MLE fit: mu={mu_hat:.2f}, sigma2={sigma2_hat:.2f}")
+    print(f"pdf at the mean: {gaussian_pdf(mu_hat, mu_hat, sigma2_hat):.3f}")
+    print(f"cdf at the mean (expect 0.5): {gaussian_cdf(mu_hat, mu_hat, sigma2_hat):.3f}")
+    print(f"median via quantile_gaussian (expect ~= mu_hat): {quantile_gaussian(0.5, mu_hat, sigma2_hat):.2f}")
+    low, high = central_interval(mu_hat, sigma2_hat)
+    print(f"95% central interval for tomorrow's reading: ({low:.2f}, {high:.2f})")
+
+    # (B) Predictive
+    elevation, temperature = generate_elevation_temperature()
+    # Standarize eleveation to make the learning rate more stable (otherwise the gradients are huge and training diverges)
+    print(f"softplus(0) sanity check (expect ~0.693): {softplus(0.0):.3f}")
+
+    w_mu0, b_mu0, w_sigma0, b_sigma0 = 0.0, 0.0, 0.0, 0.0
+    mu0, sigma0 = forward_gaussian_regression(elevation, w_mu0, b_mu0, w_sigma0, b_sigma0)
+    print(f"untrained model's avg predicted sigma: {sigma0.mean():.3f} (expect ~0.693)")
+    loss0 = gaussian_nll_regression(temperature, mu0, sigma0)
+    print(f"untrained model's loss: {loss0:.3f}")
+    g0 = gradients_gaussian_regression(elevation, temperature, mu0, sigma0)
+    print(f"initial gradients: {g0}")
+
+    w_mu_h, b_mu_h, w_sigma_h, b_sigma_h = train_gaussian_regression(elevation, temperature, heteroscedastic=True)
+    print("heteroscedastic fit:", w_mu_h, b_mu_h, w_sigma_h, b_sigma_h)
+
+    w_mu_c, b_mu_c, w_sigma_c, b_sigma_c = train_gaussian_regression(elevation, temperature, heteroscedastic=False)
+    print("homoscedastic fit:  ", w_mu_c, b_mu_c, w_sigma_c, b_sigma_c)
+
+    xs = np.linspace(0, 3000, 100)
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5), sharey=True)
+    for ax, (w_mu, b_mu, w_sigma, b_sigma, title) in zip(axes, [
+        (w_mu_c, b_mu_c, w_sigma_c, b_sigma_c, "Homoscedastic (fixed uncertainty)"),
+        (w_mu_h, b_mu_h, w_sigma_h, b_sigma_h, "Heteroscedastic (elevation-dependent)"),
+    ]):
+        mu_line, sigma_line = forward_gaussian_regression(xs, w_mu, b_mu, w_sigma, b_sigma)
+        ax.scatter(elevation, temperature, s=8, alpha=0.4)
+        ax.plot(xs, mu_line, "k-")
+        ax.fill_between(xs, mu_line - 2 * sigma_line, mu_line + 2 * sigma_line, alpha=0.3)
+        ax.set_title(title, fontsize=10)
+        ax.set_xlabel("elevation (m)")
+    axes[0].set_ylabel("temperature (deg C)")
+    fig.savefig("gaussian_regression_result.png", dpi=150)
+    print("saved gaussian_regression_result.png")
